@@ -1,0 +1,10 @@
+fastapi==0.115.0
+uvicorn==0.30.6
+python-multipart==0.0.12
+faster-whisper==1.0.3
+anthropic==0.40.0
+python-docx==1.1.2
+pydub==0.25.1
+aiofiles==24.1.0
+pyannote.audio==3.3.2
+torch>=2.0.0
