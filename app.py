@@ -1005,7 +1005,7 @@ function showSpeakerNamePanel(transcript) {
 }
 
 async function autoIdentifySpeakers() {
-  const transcript = document.getElementById('transcript-display')?.innerText || '';
+  const transcript = currentTranscript;
   if (!transcript.trim()) {
     alert('先に文字起こしを実行してください。');
     return;
