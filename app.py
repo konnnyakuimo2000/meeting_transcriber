@@ -15,8 +15,119 @@ import os
 import asyncio
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from datetime import datetime
+
+# torchaudio 2.11+ removed several APIs that pyannote.audio 3.x still uses.
+# Each patch is independent so one failure doesn't block the rest.
+try:
+    import torchaudio as _torchaudio
+    import soundfile as _sf
+    import torch as _torch_pa
+
+    if not hasattr(_torchaudio, "AudioMetaData"):
+        from dataclasses import dataclass as _dc
+
+        @_dc
+        class _AudioMetaData:
+            sample_rate: int
+            num_frames: int
+            num_channels: int
+            bits_per_sample: int
+            encoding: str
+
+        _torchaudio.AudioMetaData = _AudioMetaData
+except Exception:
+    pass
+
+try:
+    import torchaudio as _torchaudio
+    if not hasattr(_torchaudio, "list_audio_backends"):
+        _torchaudio.list_audio_backends = lambda: ["soundfile", "sox_io"]
+except Exception:
+    pass
+
+try:
+    import torchaudio as _torchaudio
+    import soundfile as _sf
+    import torch as _torch_pa
+
+    _orig_torchaudio_load = getattr(_torchaudio, "load", None)
+
+    def _sf_load(path, frame_offset=0, num_frames=-1, **kwargs):
+        kwargs.pop("backend", None)
+        with _sf.SoundFile(str(path)) as f:
+            sr = f.samplerate
+            if frame_offset > 0:
+                f.seek(frame_offset)
+            frames = num_frames if num_frames > 0 else -1
+            data = f.read(frames=frames, dtype="float32", always_2d=True)
+        return _torch_pa.from_numpy(data.T), sr
+
+    _torchaudio.load = _sf_load
+except Exception:
+    pass
+
+try:
+    import torchaudio as _torchaudio
+    import soundfile as _sf
+
+    def _sf_info(path, **kwargs):
+        kwargs.pop("backend", None)
+        with _sf.SoundFile(str(path)) as f:
+            return _torchaudio.AudioMetaData(
+                sample_rate=f.samplerate,
+                num_frames=len(f),
+                num_channels=f.channels,
+                bits_per_sample=16,
+                encoding="PCM_S",
+            )
+
+    _torchaudio.info = _sf_info
+except Exception:
+    pass
+
+# PyTorch 2.6+ changed torch.load default to weights_only=True;
+# pyannote checkpoints contain many custom classes not in the allowlist.
+# Force weights_only=False at the serialization level (safe for trusted HuggingFace models).
+try:
+    import torch as _torch
+    import torch.serialization as _torch_serial
+    import functools as _functools
+
+    _orig_serial_load = _torch_serial.load
+
+    @_functools.wraps(_orig_serial_load)
+    def _patched_serial_load(*args, **kwargs):
+        kwargs["weights_only"] = False
+        return _orig_serial_load(*args, **kwargs)
+
+    _torch_serial.load = _patched_serial_load
+    _torch.load = _patched_serial_load
+except Exception:
+    pass
+
+# huggingface_hub 0.20+ removed use_auth_token; pyannote.audio 3.x still passes it.
+try:
+    import huggingface_hub as _hf_hub
+    import functools as _functools
+
+    for _fn_name in ("hf_hub_download", "snapshot_download"):
+        _orig = getattr(_hf_hub, _fn_name, None)
+        if _orig is None:
+            continue
+
+        @_functools.wraps(_orig)
+        def _patched(*args, _orig=_orig, **kwargs):
+            if "use_auth_token" in kwargs:
+                token = kwargs.pop("use_auth_token")
+                kwargs.setdefault("token", token)
+            return _orig(*args, **kwargs)
+
+        setattr(_hf_hub, _fn_name, _patched)
+except Exception:
+    pass
 
 import json
 import re
@@ -24,7 +135,7 @@ import re
 import aiofiles
 import anthropic
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
 from faster_whisper import WhisperModel
 from docx import Document
@@ -32,6 +143,9 @@ from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 # ── 設定 ──────────────────────────────────────────────────────────────
+from dotenv import load_dotenv
+load_dotenv()
+
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL", "medium")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -46,8 +160,11 @@ app = FastAPI(title="議事録自動生成")
 
 # ── Whisperモデル（起動時に一度だけロード）────────────────────────────
 print(f"Whisperモデル ({WHISPER_MODEL_SIZE}) をロード中...")
-whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="auto", compute_type="auto")
+whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cuda", compute_type="float16")
 print("Whisperモデル ロード完了")
+
+# ── ジョブ進捗管理 ────────────────────────────────────────────────────
+_jobs: dict[str, dict] = {}
 
 # ── pyannote 話者識別モデル（遅延ロード）─────────────────────────────
 _diarization_pipeline = None
@@ -122,22 +239,27 @@ def diarize(audio_path: Path) -> list[dict]:
 
 
 # ── Whisper 文字起こし（セグメント付き）──────────────────────────────
-def transcribe_with_segments(audio_path: Path) -> tuple[list[dict], str]:
+def transcribe_with_segments(audio_path: Path, progress_cb=None) -> tuple[list[dict], str]:
     """
     Whisperで文字起こしし、タイムスタンプ付きセグメントのリストを返す。
-    [{"start": 0.0, "end": 5.2, "text": "こんにちは"}, ...]
+    progress_cb(pct, label) が渡された場合、セグメントごとに呼び出す。
     """
-    segments, info = whisper_model.transcribe(
+    segments_gen, info = whisper_model.transcribe(
         str(audio_path),
         beam_size=5,
         language=None,
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 500},
     )
-    result = [
-        {"start": seg.start, "end": seg.end, "text": seg.text.strip()}
-        for seg in segments
-    ]
+    total = max(getattr(info, "duration", 1) or 1, 1)
+    result = []
+    for seg in segments_gen:
+        result.append({"start": seg.start, "end": seg.end, "text": seg.text.strip()})
+        if progress_cb:
+            pct = min(58, 10 + int(seg.end / total * 50))
+            mm_c, ss_c = int(seg.end // 60), int(seg.end % 60)
+            mm_t, ss_t = int(total // 60), int(total % 60)
+            progress_cb(pct, f"文字起こし中... {mm_c:02d}:{ss_c:02d} / {mm_t:02d}:{ss_t:02d}")
     return result, info.language
 
 
@@ -229,8 +351,8 @@ MINUTES_SYSTEM_PROMPT = """あなたは優秀な議事録作成アシスタン�
 不明瞭な箇所は「（不明）」と記載してください。"""
 
 
-def generate_minutes(transcript: str, template: str = "") -> str:
-    """Claude APIで議事録を生成する。templateが指定された場合はそのフォーマットに従う。"""
+def generate_minutes(transcript: str, template: str = "", progress_cb=None) -> str:
+    """Claude APIで議事録を生成する。progress_cbが渡された場合はストリーミングで進捗を更新する。"""
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY が設定されていません。")
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -250,6 +372,8 @@ def generate_minutes(transcript: str, template: str = "") -> str:
         chunks = _split_transcript(transcript, MAX_CHARS)
         summaries = []
         for i, chunk in enumerate(chunks, 1):
+            if progress_cb:
+                progress_cb(75 + int(i / len(chunks) * 10), f"議事録生成中（第{i}/{len(chunks)}部を要約）...")
             resp = client.messages.create(
                 model="claude-opus-4-8",
                 max_tokens=4096,
@@ -260,22 +384,53 @@ def generate_minutes(transcript: str, template: str = "") -> str:
             summaries.append(_extract_text(resp))
         combined = "\n\n---\n\n".join(summaries)
         final_prompt = f"以下は各パートの要約です。{'テンプレートフォーマットに従い、' if template else ''}最終的な議事録を作成してください:\n\n{combined}"
-        resp = client.messages.create(
-            model="claude-opus-4-8",
-            max_tokens=8192,
-            thinking={"type": "adaptive"},
-            system=system_prompt,
-            messages=[{"role": "user", "content": final_prompt}],
-        )
+        if progress_cb:
+            progress_cb(87, "最終議事録を生成中（Claude）...")
+            minutes_text = ""
+            with client.messages.stream(
+                model="claude-opus-4-8",
+                max_tokens=8192,
+                thinking={"type": "adaptive"},
+                system=system_prompt,
+                messages=[{"role": "user", "content": final_prompt}],
+            ) as stream:
+                for text in stream.text_stream:
+                    minutes_text += text
+                    progress_cb(min(94, 87 + len(minutes_text) // 200), "議事録を生成中（Claude）...")
+            return minutes_text
+        else:
+            resp = client.messages.create(
+                model="claude-opus-4-8",
+                max_tokens=8192,
+                thinking={"type": "adaptive"},
+                system=system_prompt,
+                messages=[{"role": "user", "content": final_prompt}],
+            )
+            return _extract_text(resp)
     else:
-        resp = client.messages.create(
-            model="claude-opus-4-8",
-            max_tokens=8192,
-            thinking={"type": "adaptive"},
-            system=system_prompt,
-            messages=[{"role": "user", "content": f"{user_prefix}\n\n{transcript}"}],
-        )
-    return _extract_text(resp)
+        if progress_cb:
+            progress_cb(75, "議事録を生成中（Claude）...")
+            minutes_text = ""
+            with client.messages.stream(
+                model="claude-opus-4-8",
+                max_tokens=8192,
+                thinking={"type": "adaptive"},
+                system=system_prompt,
+                messages=[{"role": "user", "content": f"{user_prefix}\n\n{transcript}"}],
+            ) as stream:
+                for text in stream.text_stream:
+                    minutes_text += text
+                    progress_cb(min(94, 75 + len(minutes_text) // 150), "議事録を生成中（Claude）...")
+            return minutes_text
+        else:
+            resp = client.messages.create(
+                model="claude-opus-4-8",
+                max_tokens=8192,
+                thinking={"type": "adaptive"},
+                system=system_prompt,
+                messages=[{"role": "user", "content": f"{user_prefix}\n\n{transcript}"}],
+            )
+            return _extract_text(resp)
 
 
 def _extract_text(response) -> str:
@@ -429,7 +584,130 @@ def create_docx(minutes_md: str, title: str) -> Path:
     return out_path
 
 
+# ── バックグラウンドジョブ ────────────────────────────────────────────
+async def _run_job(job_id: str, tmp_path: Path, do_diarize: bool, template_text: str, original_filename: str):
+    def cb(pct: int, label: str):
+        if job_id in _jobs:
+            _jobs[job_id].update({"pct": pct, "label": label})
+
+    try:
+        loop = asyncio.get_event_loop()
+        lang = "unknown"
+
+        if do_diarize:
+            cb(10, "文字起こし中（Whisper）...")
+            whisper_segs, lang = await loop.run_in_executor(
+                None, lambda: transcribe_with_segments(tmp_path, progress_cb=cb)
+            )
+            cb(60, "話者を識別中（pyannote）...")
+            diarize_segs = await loop.run_in_executor(None, diarize, tmp_path)
+            cb(72, "話者ラベルを整理中...")
+            labeled = _assign_speaker_labels(whisper_segs, diarize_segs)
+            transcript = _format_speaker_transcript(labeled)
+        else:
+            cb(10, "文字起こし中（Whisper）...")
+            segs, lang = await loop.run_in_executor(
+                None, lambda: transcribe_with_segments(tmp_path, progress_cb=cb)
+            )
+            lines = []
+            for seg in segs:
+                ts = f"[{int(seg['start']//60):02d}:{int(seg['start']%60):02d}]"
+                lines.append(f"{ts} {seg['text']}")
+            transcript = "\n".join(lines)
+
+        cb(75, "議事録を生成中（Claude）...")
+        minutes = await loop.run_in_executor(
+            None, lambda: generate_minutes(transcript, template_text, progress_cb=cb)
+        )
+
+        cb(96, "ファイルを保存中...")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        stem = Path(original_filename).stem
+        title = f"{stem}_{timestamp}"
+        (OUTPUT_DIR / f"{title}.md").write_text(minutes, encoding="utf-8")
+        create_docx(minutes, title)
+
+        _jobs[job_id].update({
+            "pct": 100,
+            "label": "完了！",
+            "done": True,
+            "result": {
+                "success": True,
+                "language": lang,
+                "transcript": transcript,
+                "minutes": minutes,
+                "diarization_used": do_diarize,
+                "template_used": bool(template_text),
+                "files": {
+                    "markdown": f"/download/md/{title}",
+                    "word": f"/download/docx/{title}",
+                },
+            },
+        })
+    except Exception as e:
+        _jobs[job_id] = {"pct": 0, "label": "エラー", "done": True, "error": str(e)}
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+
+
 # ── APIエンドポイント ─────────────────────────────────────────────────
+@app.post("/transcribe-start")
+async def transcribe_start(
+    file: UploadFile = File(...),
+    use_diarization: str = Form("false"),
+    template_file: UploadFile = File(None),
+):
+    allowed = {".mp3", ".mp4", ".m4a", ".wav", ".ogg", ".flac", ".webm", ".aac"}
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in allowed:
+        raise HTTPException(400, f"対応形式: {', '.join(allowed)}")
+
+    template_text = ""
+    if template_file and template_file.filename:
+        raw = await template_file.read()
+        template_text = raw.decode("utf-8", errors="ignore")
+
+    do_diarize = use_diarization.lower() == "true"
+    job_id = str(uuid.uuid4())
+    tmp_path = Path(tempfile.mktemp(suffix=suffix))
+    async with aiofiles.open(tmp_path, "wb") as f:
+        content = await file.read()
+        await f.write(content)
+
+    _jobs[job_id] = {"pct": 10, "label": "ファイルを受信しました...", "done": False}
+    asyncio.create_task(_run_job(job_id, tmp_path, do_diarize, template_text, file.filename))
+
+    return JSONResponse({"job_id": job_id})
+
+
+@app.get("/progress/{job_id}")
+async def get_progress(job_id: str):
+    async def event_gen():
+        try:
+            while True:
+                job = _jobs.get(job_id)
+                if not job:
+                    yield f"data: {json.dumps({'error': 'ジョブが見つかりません', 'done': True})}\n\n"
+                    return
+                yield f"data: {json.dumps(job)}\n\n"
+                if job.get("done"):
+                    _jobs.pop(job_id, None)
+                    return
+                await asyncio.sleep(0.3)
+        except (GeneratorExit, asyncio.CancelledError):
+            pass
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
 @app.post("/transcribe")
 async def transcribe_endpoint(
     file: UploadFile = File(...),
@@ -789,7 +1067,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 <script>
 let selectedFile = null;
 let diarizationAvailable = false;
-let progressInterval = null;
+let currentEventSource = null;
 let currentTitle = '';
 let currentTranscript = '';
 let currentMinutes = '';
@@ -863,20 +1141,7 @@ async function startProcess() {
 
   const useDiarize = document.getElementById('diarize-toggle').checked;
   isDiarized = useDiarize;
-
-  let pct = 5;
-  const steps = useDiarize
-    ? ['音声をアップロード中...', '文字起こし中（Whisper）...', '話者を識別中（pyannote）...', '議事録を生成中（Claude）...']
-    : ['音声をアップロード中...', '文字起こし中（Whisper）...', '議事録を生成中（Claude）...'];
-  let stepIdx = 0;
-  setProgress(pct, steps[0]);
-  progressInterval = setInterval(() => {
-    pct += Math.random() * 2;
-    if (pct > 85) pct = 85;
-    const ns = Math.floor(pct / (85 / steps.length));
-    if (ns < steps.length && ns > stepIdx) stepIdx = ns;
-    setProgress(pct, steps[stepIdx]);
-  }, 2000);
+  setProgress(0, 'アップロード中...');
 
   try {
     const form = new FormData();
@@ -885,38 +1150,55 @@ async function startProcess() {
     const templateInput = document.getElementById('template-input');
     if (templateInput.files[0]) form.append('template_file', templateInput.files[0]);
 
-    // XHRでアップロード進捗を取得
-    const data = await new Promise((resolve, reject) => {
+    // Step 1: XHRでアップロード（進捗 0→10%）
+    const startResp = await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', '/transcribe');
-
-      // アップロード進捗（0→40%）
+      xhr.open('POST', '/transcribe-start');
       xhr.upload.onprogress = e => {
         if (e.lengthComputable) {
-          const uploadPct = Math.round((e.loaded / e.total) * 40);
-          setProgress(uploadPct, uploadPct < 40 ? `アップロード中... ${Math.round(e.loaded/1024/1024*10)/10}MB / ${Math.round(e.total/1024/1024*10)/10}MB` : (useDiarize ? '文字起こし中（Whisper）...' : '文字起こし中（Whisper）...'));
-          if (uploadPct >= 40) {
-            clearInterval(progressInterval);
-            pct = 40; stepIdx = 1;
-            progressInterval = setInterval(() => {
-              pct += Math.random() * 2;
-              if (pct > 85) pct = 85;
-              const ns = Math.floor((pct - 40) / (45 / (steps.length - 1))) + 1;
-              if (ns < steps.length && ns > stepIdx) stepIdx = ns;
-              setProgress(pct, steps[stepIdx]);
-            }, 2000);
-          }
+          const pct = Math.round((e.loaded / e.total) * 10);
+          setProgress(pct, `アップロード中... ${(e.loaded/1024/1024).toFixed(1)}MB / ${(e.total/1024/1024).toFixed(1)}MB`);
         }
       };
-
       xhr.onload = () => {
         try { resolve(JSON.parse(xhr.responseText)); }
-        catch(e) { reject(new Error(xhr.responseText || '処理に失敗しました')); }
+        catch(err) { reject(new Error(xhr.responseText || '処理に失敗しました')); }
       };
       xhr.onerror = () => reject(new Error('ネットワークエラー'));
       xhr.send(form);
     });
-    clearInterval(progressInterval);
+
+    if (!startResp.job_id) throw new Error(startResp.detail || 'ジョブの開始に失敗しました');
+    setProgress(10, 'ファイルを受信しました...');
+
+    // Step 2: SSEで進捗をリアルタイム受信
+    const data = await new Promise((resolve, reject) => {
+      if (currentEventSource) { currentEventSource.close(); currentEventSource = null; }
+      currentEventSource = new EventSource('/progress/' + startResp.job_id);
+
+      currentEventSource.onmessage = e => {
+        let msg;
+        try { msg = JSON.parse(e.data); } catch { return; }
+
+        if (msg.error && !msg.result) {
+          currentEventSource.close(); currentEventSource = null;
+          reject(new Error(msg.error));
+          return;
+        }
+        if (msg.pct !== undefined) setProgress(msg.pct, msg.label || '処理中...');
+        if (msg.done) {
+          currentEventSource.close(); currentEventSource = null;
+          if (msg.result) resolve(msg.result);
+          else reject(new Error(msg.error || '結果が取得できませんでした'));
+        }
+      };
+
+      currentEventSource.onerror = () => {
+        if (currentEventSource) { currentEventSource.close(); currentEventSource = null; }
+        reject(new Error('サーバーとの接続が切れました'));
+      };
+    });
+
     if (!data.success) throw new Error(data.detail || '処理に失敗しました');
 
     setProgress(100, '完了！');
@@ -928,12 +1210,11 @@ async function startProcess() {
 
     renderResults(data);
 
-    // 話者識別済みなら名前登録パネルを表示
     if (data.diarization_used) {
       showSpeakerNamePanel(data.transcript);
     }
   } catch(e) {
-    clearInterval(progressInterval);
+    if (currentEventSource) { currentEventSource.close(); currentEventSource = null; }
     document.getElementById('progress-wrap').style.display = 'none';
     document.getElementById('error-area').innerHTML = `<p class="error-msg">❌ ${escHtml(e.message)}</p>`;
   } finally {
