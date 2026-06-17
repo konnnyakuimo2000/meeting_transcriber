@@ -6,8 +6,10 @@
 |------|-----------|
 | OS | Windows 11 Home |
 | Python | 3.13.14（Windows Store版） |
-| torch | 2.12.0+cpu |
-| torchaudio | 2.11.0+cpu |
+| torch | 2.11.0+cu128 |
+| torchaudio | 2.11.0+cu128 |
+| CUDA | 12.8（ドライバ対応: 13.2） |
+| GPU | NVIDIA GeForce RTX 4060 |
 | faster-whisper | 1.2.1 |
 | pyannote.audio | 3.3.2 |
 | anthropic SDK | 0.109.2 |
