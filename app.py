@@ -301,6 +301,43 @@ def apply_speaker_names(text: str, speaker_map: dict[str, str]) -> str:
     return text
 
 
+def auto_identify_speakers(transcript: str) -> dict[str, str]:
+    """
+    文字起こしの文脈からClaudeが話者名を推定する。
+    {"話者1": "田中", "話者2": "佐藤"} の形式で返す。
+    推定できない話者は含めない。
+    """
+    if not ANTHROPIC_API_KEY:
+        return {}
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    resp = client.messages.create(
+        model="claude-opus-4-8",
+        max_tokens=512,
+        system="""あなたは会議の文字起こしから話者の実名を特定するアシスタントです。
+
+以下のルールに従ってください：
+- 自己紹介（「私は田中です」「〇〇と申します」）
+- 呼びかけ（「田中さん」「〇〇くん」）
+- 敬称・役職の言及（「部長の〇〇が」）
+などから話者の実名を特定してください。
+
+必ずJSON形式のみで返してください。例：
+{"話者1": "田中", "話者2": "佐藤", "話者3": "鈴木"}
+
+推定できない話者はJSONに含めないでください。
+名前が全く特定できない場合は {} を返してください。
+JSON以外の文章は一切出力しないでください。""",
+        messages=[{"role": "user", "content": f"以下の文字起こしから話者の実名を特定してください:\n\n{transcript[:8000]}"}],
+    )
+    raw = _extract_text(resp).strip()
+    try:
+        # JSONブロックを抽出
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        return json.loads(m.group()) if m else {}
+    except Exception:
+        return {}
+
+
 SPEAKER_SUMMARY_SYSTEM = """あなたは会議分析アシスタントです。
 話者識別済みの文字起こしをもとに、以下を出力してください。
 
@@ -531,6 +568,19 @@ async def diarization_available():
     return {"available": bool(HF_TOKEN)}
 
 
+class AutoNameRequest(BaseModel):
+    transcript: str
+
+
+@app.post("/identify-speakers")
+async def identify_speakers(req: AutoNameRequest):
+    """文脈からClaudeが話者名を自動推定するエンドポイント。"""
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=400, detail="ANTHROPIC_API_KEY が設定されていません")
+    speaker_map = auto_identify_speakers(req.transcript)
+    return {"speaker_map": speaker_map}
+
+
 # ── フロントエンド ────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 async def index():
@@ -697,6 +747,9 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     <p class="speaker-summary-note">識別された話者に名前をつけると、議事録・サマリーに反映されます。空欄のままでも構いません。</p>
     <div class="speaker-name-grid" id="speaker-name-grid"></div>
     <div style="display:flex;gap:.7rem;flex-wrap:wrap;align-items:center">
+      <button class="btn" id="auto-name-btn" onclick="autoIdentifySpeakers()" style="background:#6c5ce7;color:#fff">
+        🤖 AIが自動で名前を推定
+      </button>
       <button class="btn btn-accent" id="apply-names-btn" onclick="applyNamesAndSummarize()">
         ✨ 名前を適用して話者別サマリーを生成
       </button>
@@ -949,6 +1002,42 @@ function showSpeakerNamePanel(transcript) {
   }
   document.getElementById('speaker-name-card').style.display = 'block';
   document.getElementById('summary-progress-wrap').style.display = 'none';
+}
+
+async function autoIdentifySpeakers() {
+  const transcript = document.getElementById('transcript-display')?.innerText || '';
+  if (!transcript.trim()) {
+    alert('先に文字起こしを実行してください。');
+    return;
+  }
+  const btn = document.getElementById('auto-name-btn');
+  btn.disabled = true;
+  btn.textContent = '🤖 推定中...';
+  try {
+    const res = await fetch('/identify-speakers', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({transcript})
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    const map = data.speaker_map || {};
+    if (Object.keys(map).length === 0) {
+      alert('会話の文脈から話者名を特定できませんでした。手動で入力してください。');
+    } else {
+      // 入力欄にセット（ユーザーが後から編集可能）
+      document.querySelectorAll('.speaker-name-input').forEach(input => {
+        const label = input.dataset.speaker;
+        if (map[label]) input.value = map[label];
+      });
+      alert('AIが推定した名前をセットしました。必要に応じて修正してください。');
+    }
+  } catch(e) {
+    alert('自動命名に失敗しました: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🤖 AIが自動で名前を推定';
+  }
 }
 
 async function applyNamesAndSummarize() {
