@@ -1,3 +1,7 @@
+# torch / torchaudio は index-url が異なるため別途インストール（STARTUP.md 参照）
+# GPU: pip install torch==2.11.0+cu128 torchaudio==2.11.0+cu128 --index-url https://download.pytorch.org/whl/cu128
+# CPU: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+
 fastapi==0.115.0
 uvicorn==0.30.6
 python-multipart==0.0.12
@@ -8,10 +12,6 @@ pydub==0.25.1
 aiofiles==24.1.0
 python-dotenv>=1.0.0
 pyannote.audio==3.3.2
-# GPU環境（RTX 4060 / CUDA 12.8）
-# pip install torch==2.11.0+cu128 torchaudio==2.11.0+cu128 --index-url https://download.pytorch.org/whl/cu128
-# CPU環境
-# pip install torch torchaudio
 matplotlib>=3.0.0
 soundfile>=0.12.0
 torchcodec>=0.14.0
