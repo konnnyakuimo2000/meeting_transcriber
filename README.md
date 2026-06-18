@@ -8,10 +8,10 @@
 
 - **音声文字起こし** — faster-whisper（ローカル実行・無料・プライバシー保護）
 - **話者識別** — pyannote.audio による話者分離（誰が話したかを自動判定）
-- **AI自動命名** — Claudeが会話の文脈（自己紹介・呼びかけ・役職など）から話者名を自動推定
+- **AI自動命名** — 会話の文脈（自己紹介・呼びかけ・役職など）から話者名を自動推定
 - **話者名登録** — 識別後に各話者へ任意の名前を付与（AI推定結果の手動修正も可能）
-- **話者別サマリー** — 各話者の主張・キーワード・スタンスをClaudeが要約
-- **議事録生成** — Claude API（claude-opus-4-8）による構造化議事録
+- **話者別サマリー** — 各話者の主張・キーワード・スタンスをAIが要約
+- **議事録生成** — AI による構造化議事録（Anthropic / OpenAI / Gemini 対応）
 - **テンプレート対応** — 独自フォーマットをアップロードしてそのまま出力
 - **出力形式** — Markdown / Word（.docx）ダウンロード
 - **長時間音声対応** — 自動チャンク分割処理
@@ -25,8 +25,8 @@
 | Web フレームワーク | FastAPI + Uvicorn |
 | 文字起こし | faster-whisper（OpenAI Whisper ローカル版） |
 | 話者識別 | pyannote.audio 3.3.2 |
-| 機械学習 | PyTorch 2.5.0 |
-| 議事録生成 | Anthropic Claude API（claude-opus-4-8） |
+| 機械学習 | PyTorch |
+| 議事録生成 | Anthropic Claude / OpenAI / Google Gemini（選択式） |
 | Word 出力 | python-docx |
 | 音声変換 | FFmpeg |
 | フロントエンド | HTML / CSS / Vanilla JS（組み込み） |
@@ -38,18 +38,21 @@
 - Windows 10/11
 - Python 3.11（Anaconda 推奨）
 - FFmpeg（winget でインストール）
-- インターネット接続（Claude API / HuggingFace モデル取得に必要）
+- インターネット接続（AI API / HuggingFace モデル取得に必要）
 
 ---
 
 ## セットアップ
 
-### 1. 必要なアカウント・APIキーを取得
+### 1. AIプロバイダーのAPIキーを取得
 
-**Anthropic APIキー（必須）**
-1. [console.anthropic.com](https://console.anthropic.com) でアカウント作成
-2. Billing でクレジットカードを登録・クレジットチャージ
-3. API Keys でキーを発行（`sk-ant-...`）
+以下のいずれか1つを取得してください。複数持っている場合は `.env` の `AI_PROVIDER` で切り替えられます。
+
+| プロバイダー | 取得先 | 環境変数 |
+|------------|--------|---------|
+| Anthropic Claude | [console.anthropic.com](https://console.anthropic.com) | `ANTHROPIC_API_KEY` |
+| OpenAI | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | `OPENAI_API_KEY` |
+| Google Gemini | [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey) | `GEMINI_API_KEY` |
 
 **HuggingFace Token（話者識別を使う場合のみ）**
 1. [huggingface.co](https://huggingface.co) でアカウント作成
@@ -77,18 +80,34 @@ pip install -r requirements.txt
 
 ### 4. 環境変数を設定
 
-`.env.example` をコピーして `.env` を作成し、APIキーを記入します。
+`.env.example` をコピーして `.env` を作成し、使用するプロバイダーのAPIキーを記入します。
 
 ```powershell
 copy .env.example .env
 ```
 
-`.env` の内容：
+**Anthropic を使う場合の `.env` 例：**
 
 ```env
 ANTHROPIC_API_KEY=sk-ant-xxxxxxxx
 WHISPER_MODEL=medium
 HF_TOKEN=hf_xxxxxxxx
+```
+
+**OpenAI を使う場合の `.env` 例：**
+
+```env
+OPENAI_API_KEY=sk-xxxxxxxx
+OPENAI_MODEL=gpt-4o
+WHISPER_MODEL=medium
+```
+
+**複数プロバイダーがある場合：**
+
+```env
+ANTHROPIC_API_KEY=sk-ant-xxxxxxxx
+OPENAI_API_KEY=sk-xxxxxxxx
+AI_PROVIDER=openai   # 使いたいプロバイダーを明示
 ```
 
 **WHISPER_MODEL の選択肢：**
@@ -127,7 +146,7 @@ $condaPython = "$env:USERPROFILE\anaconda3\envs\meeting_transcriber\python.exe"
 1. 「👥 話者識別を有効にする」トグルをON
 2. 音声ファイルをアップロードして生成
 3. 完了後、話者名入力パネルが表示される
-4. 「🤖 AIが自動で名前を推定」をクリックすると、Claudeが会話の文脈から話者名を推定して入力欄にセット
+4. 「🤖 AIが自動で名前を推定」をクリックすると、会話の文脈から話者名を推定して入力欄にセット
 5. 必要に応じて手動で名前を修正・入力（例：話者1 → 田中）
 6. 「✨ 名前を適用して話者別サマリーを生成」をクリック
 7. **話者別サマリータブ** で各話者の発言要約を確認
@@ -157,15 +176,31 @@ MP3 / MP4 / M4A / WAV / OGG / FLAC / WebM / AAC
 
 ## API 料金の目安
 
-Claude API（claude-opus-4-8）の従量課金：
+議事録生成は選択したプロバイダーの従量課金が発生します。文字起こし（Whisper）はローカル実行のため無料です。
 
-| 会議の長さ | 概算コスト |
-|-----------|-----------|
-| 30分 | 約 $0.05〜0.15（約8〜23円） |
-| 1時間 | 約 $0.10〜0.30（約15〜45円） |
-| 2時間 | 約 $0.20〜0.60（約30〜90円） |
+| プロバイダー | モデル | 1時間音声の目安 |
+|------------|--------|--------------|
+| Anthropic | claude-opus-4-8 | 約 $0.10〜0.30（約15〜45円） |
+| OpenAI | gpt-4o | 約 $0.05〜0.20（約8〜30円） |
+| Google | gemini-1.5-pro | 約 $0.03〜0.15（約5〜23円） |
 
-文字起こし（Whisper）はローカル実行のため無料です。
+---
+
+## テスト
+
+127件のテストが用意されています。
+
+```powershell
+# 全テストを実行
+pytest test_app.py test_frontend.py -v
+```
+
+| テストファイル | 件数 | 内容 |
+|--------------|------|------|
+| `test_app.py` | 89件 | Python バックエンド（全エンドポイント・ユーティリティ関数） |
+| `test_frontend.py` | 38件 | HTML 内 JavaScript 関数（Node.js 実行） |
+
+> `test_frontend.py` の実行には Node.js が必要です。
 
 ---
 
@@ -175,6 +210,8 @@ Claude API（claude-opus-4-8）の従量課金：
 meeting_transcriber/
 ├── app.py               # メインアプリケーション
 ├── requirements.txt     # Python 依存パッケージ
+├── test_app.py          # バックエンドテスト（89件）
+├── test_frontend.py     # フロントエンド JS テスト（38件）
 ├── .env                 # APIキー設定（Git管理外）
 ├── .env.example         # 環境変数テンプレート
 ├── .gitignore
