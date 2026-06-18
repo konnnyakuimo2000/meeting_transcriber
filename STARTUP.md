@@ -34,8 +34,13 @@ winget install Gyan.FFmpeg
 インストール後 PowerShell を再起動すること。  
 **full_build 版を使用。full-shared 版は不要。**
 
-### 3. Anthropic APIキー（必須）
-[console.anthropic.com](https://console.anthropic.com) でキーを発行（`sk-ant-...`）。
+### 3. AIプロバイダーのAPIキー（いずれか1つ必須）
+
+| プロバイダー | 取得先 | 環境変数 |
+|------------|--------|---------|
+| Anthropic Claude | [console.anthropic.com](https://console.anthropic.com) | `ANTHROPIC_API_KEY` |
+| OpenAI | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | `OPENAI_API_KEY` |
+| Google Gemini | [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey) | `GEMINI_API_KEY` |
 
 ### 4. HuggingFace Token + モデル利用規約への同意（話者識別を使う場合のみ）
 1. [huggingface.co](https://huggingface.co) でアカウント作成
@@ -80,7 +85,9 @@ copy .env.example .env
 
 `.env` の内容:
 ```env
-ANTHROPIC_API_KEY=sk-ant-xxxxxxxx   # 必須
+ANTHROPIC_API_KEY=sk-ant-xxxxxxxx   # Anthropic を使う場合
+# OPENAI_API_KEY=sk-xxxxxxxx       # OpenAI を使う場合
+# GEMINI_API_KEY=AIza-xxxxxxxx     # Google Gemini を使う場合
 HF_TOKEN=hf_xxxxxxxx               # 話者識別を使う場合のみ
 WHISPER_MODEL=large-v3             # tiny / base / small / medium / large-v3
 ```

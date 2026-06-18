@@ -677,7 +677,7 @@ async def _run_job(job_id: str, tmp_path: Path, do_diarize: bool, template_text:
                 lines.append(f"{ts} {seg['text']}")
             transcript = "\n".join(lines)
 
-        cb(75, "議事録を生成中（Claude）...")
+        cb(75, f"議事録を生成中（{_provider_label()}）...")
         minutes = await loop.run_in_executor(
             None, lambda: generate_minutes(transcript, template_text, progress_cb=cb)
         )
@@ -879,7 +879,7 @@ async def process_speakers(req: SpeakerProcessRequest):
     renamed_transcript = apply_speaker_names(req.transcript, req.speaker_map)
     renamed_minutes = apply_speaker_names(req.minutes, req.speaker_map)
 
-    # 話者別サマリー（Claudeで生成）
+    # 話者別サマリー（AIで生成）
     speaker_summary = await loop.run_in_executor(
         None, generate_speaker_summaries, renamed_transcript
     )
@@ -1026,7 +1026,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 <body>
 <header>
   <h1>🎙️ 議事録自動生成</h1>
-  <span class="badge">Whisper + Claude</span>
+  <span class="badge">Whisper + AI</span>
 </header>
 <main>
   <!-- アップロードカード -->
@@ -1406,7 +1406,7 @@ async function applyNamesAndSummarize() {
     pct += Math.random() * 3;
     if (pct > 85) pct = 85;
     summaryFill.style.width = pct + '%';
-    if (pct > 40) summaryStatus.textContent = '話者別サマリーを生成中（Claude）...';
+    if (pct > 40) summaryStatus.textContent = '話者別サマリーを生成中（AI）...';
   }, 1500);
 
   try {
