@@ -417,3 +417,188 @@ try:
 
 except ImportError:
     pass  # httpx / fastapi.testclient が未インストールの場合はスキップ
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 10. create_docx
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class TestCreateDocx:
+    """create_docx は outputs/ にファイルを書く。各テスト後に削除する。"""
+
+    def _run(self, md: str, title: str = "test_output") -> Path:
+        path = _app.create_docx(md, title)
+        return path
+
+    def _cleanup(self, path: Path):
+        if path.exists():
+            path.unlink()
+
+    def test_creates_file(self):
+        path = self._run("# タイトル", "test_creates_file")
+        try:
+            assert path.exists()
+            assert path.suffix == ".docx"
+        finally:
+            self._cleanup(path)
+
+    def test_headings_are_written(self):
+        from docx import Document as _Document
+        md = "# 見出し1\n## 見出し2\n### 見出し3"
+        path = self._run(md, "test_headings")
+        try:
+            doc = _Document(str(path))
+            styles = [p.style.name for p in doc.paragraphs]
+            assert any("Heading 1" in s for s in styles)
+            assert any("Heading 2" in s for s in styles)
+            assert any("Heading 3" in s for s in styles)
+        finally:
+            self._cleanup(path)
+
+    def test_bullet_list_written(self):
+        from docx import Document as _Document
+        md = "- アイテム1\n- アイテム2"
+        path = self._run(md, "test_bullets")
+        try:
+            doc = _Document(str(path))
+            texts = [p.text for p in doc.paragraphs]
+            assert "アイテム1" in texts
+            assert "アイテム2" in texts
+        finally:
+            self._cleanup(path)
+
+    def test_table_written(self):
+        from docx import Document as _Document
+        md = "| 担当者 | タスク | 期限 |\n|--------|--------|------|\n| 田中 | 資料作成 | 来週 |"
+        path = self._run(md, "test_table")
+        try:
+            doc = _Document(str(path))
+            assert len(doc.tables) == 1
+            row = doc.tables[0].rows[0]
+            assert row.cells[0].text == "担当者"
+            assert row.cells[1].text == "タスク"
+        finally:
+            self._cleanup(path)
+
+    def test_separator_row_skipped(self):
+        """Markdownのテーブル区切り行（---|---）はdocxに追加されない"""
+        from docx import Document as _Document
+        md = "| A | B |\n|---|---|\n| 1 | 2 |"
+        path = self._run(md, "test_separator")
+        try:
+            doc = _Document(str(path))
+            assert len(doc.tables) == 1
+            assert len(doc.tables[0].rows) == 2  # ヘッダー行 + データ行のみ
+        finally:
+            self._cleanup(path)
+
+    def test_horizontal_rule_written(self):
+        from docx import Document as _Document
+        md = "---"
+        path = self._run(md, "test_hr")
+        try:
+            doc = _Document(str(path))
+            texts = [p.text for p in doc.paragraphs]
+            assert any("─" in t for t in texts)
+        finally:
+            self._cleanup(path)
+
+    def test_plain_paragraph_written(self):
+        from docx import Document as _Document
+        md = "これは通常の段落です。"
+        path = self._run(md, "test_plain")
+        try:
+            doc = _Document(str(path))
+            texts = [p.text for p in doc.paragraphs]
+            assert "これは通常の段落です。" in texts
+        finally:
+            self._cleanup(path)
+
+    def test_empty_lines_skipped(self):
+        """空行はdocxに追加されない"""
+        from docx import Document as _Document
+        md = "段落1\n\n\n段落2"
+        path = self._run(md, "test_empty_lines")
+        try:
+            doc = _Document(str(path))
+            texts = [p.text for p in doc.paragraphs if p.text.strip()]
+            assert texts == ["段落1", "段落2"]
+        finally:
+            self._cleanup(path)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 11. generate_minutes
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class TestGenerateMinutes:
+    def _mock_text_response(self, text: str):
+        block = MagicMock()
+        block.type = "text"
+        block.text = text
+        resp = MagicMock()
+        resp.content = [block]
+        return resp
+
+    def _mock_stream(self, texts: list[str]):
+        stream = MagicMock()
+        stream.__enter__ = MagicMock(return_value=stream)
+        stream.__exit__ = MagicMock(return_value=False)
+        stream.text_stream = iter(texts)
+        return stream
+
+    def test_raises_without_api_key(self):
+        with patch("app.ANTHROPIC_API_KEY", ""):
+            with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+                _app.generate_minutes("テスト")
+
+    def test_short_transcript_no_callback(self):
+        """短いテキスト・progress_cbなし → messages.create を1回呼ぶ"""
+        with patch("app.ANTHROPIC_API_KEY", "dummy"), \
+             patch("app.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.return_value = self._mock_text_response("議事録テスト")
+            result = _app.generate_minutes("短い文字起こし")
+        assert result == "議事録テスト"
+        mock_cls.return_value.messages.create.assert_called_once()
+
+    def test_short_transcript_with_callback(self):
+        """短いテキスト・progress_cbあり → messages.stream を使う"""
+        with patch("app.ANTHROPIC_API_KEY", "dummy"), \
+             patch("app.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.stream.return_value = self._mock_stream(["議事", "録"])
+            calls = []
+            _app.generate_minutes("短い文字起こし", progress_cb=lambda p, l: calls.append(p))
+        mock_cls.return_value.messages.stream.assert_called_once()
+        assert len(calls) >= 1
+        assert calls[0] == 75  # 最初のprogress_cb呼び出し
+
+    def test_template_included_in_system_prompt(self):
+        """templateが渡された場合、system_promptにテンプレートが含まれる"""
+        with patch("app.ANTHROPIC_API_KEY", "dummy"), \
+             patch("app.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.return_value = self._mock_text_response("result")
+            _app.generate_minutes("文字起こし", template="## カスタムフォーマット")
+        call_kwargs = mock_cls.return_value.messages.create.call_args[1]
+        assert "カスタムフォーマット" in call_kwargs["system"]
+
+    def test_long_transcript_splits_into_chunks(self):
+        """80,000文字超のテキストはチャンク分割して複数回APIを呼ぶ"""
+        long_transcript = "a\n" * 50_000  # 約100,000文字
+        with patch("app.ANTHROPIC_API_KEY", "dummy"), \
+             patch("app.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.return_value = self._mock_text_response("chunk summary")
+            _app.generate_minutes(long_transcript)
+        # チャンク数+最終生成で複数回呼ばれることを確認
+        assert mock_cls.return_value.messages.create.call_count >= 2
+
+    def test_long_transcript_progress_callback_called(self):
+        """長いテキスト・progress_cbあり → チャンクごとにcbが呼ばれる"""
+        long_transcript = "a\n" * 50_000
+        with patch("app.ANTHROPIC_API_KEY", "dummy"), \
+             patch("app.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.return_value = self._mock_text_response("summary")
+            mock_cls.return_value.messages.stream.return_value = self._mock_stream(["最終議事録"])
+            calls = []
+            _app.generate_minutes(long_transcript, progress_cb=lambda p, l: calls.append((p, l)))
+        assert any("要約" in label for _, label in calls)
+        assert any("最終" in label for _, label in calls)

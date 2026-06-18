@@ -561,7 +561,7 @@ def create_docx(minutes_md: str, title: str) -> Path:
         elif line.startswith("- "):
             doc.add_paragraph(line[2:], style="List Bullet")
             current_table[0] = None
-        elif line.startswith("| "):
+        elif line.startswith("|"):
             cells = [c.strip() for c in line.strip("|").split("|")]
             if all(set(c) <= set("-: ") for c in cells):
                 continue
