@@ -441,7 +441,7 @@ def _extract_text(response) -> str:
 def extract_speakers(transcript: str) -> list[str]:
     """文字起こしテキストから話者ラベルを順番に抽出（重複なし）。"""
     seen: dict[str, None] = {}
-    for m in re.finditer(r"話者\S+", transcript):
+    for m in re.finditer(r"話者[^\s:：]+", transcript):
         seen[m.group()] = None
     return list(seen.keys())
 
@@ -532,7 +532,7 @@ def _split_transcript(text: str, max_chars: int) -> list[str]:
             current, current_len = [], 0
         current.append(line)
         current_len += len(line)
-    if current:
+    if current and any(line for line in current):
         chunks.append("\n".join(current))
     return chunks
 
