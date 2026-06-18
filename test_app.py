@@ -550,8 +550,8 @@ class TestGenerateMinutes:
         return stream
 
     def test_raises_without_api_key(self):
-        with patch("app.ANTHROPIC_API_KEY", ""):
-            with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        with patch("app.ANTHROPIC_API_KEY", ""), patch("app.OPENAI_API_KEY", ""), patch("app.GEMINI_API_KEY", ""):
+            with pytest.raises(RuntimeError, match="APIキー"):
                 _app.generate_minutes("テスト")
 
     def test_short_transcript_no_callback(self):
@@ -692,8 +692,8 @@ class TestGenerateSpeakerSummaries:
         return resp
 
     def test_raises_without_api_key(self):
-        with patch("app.ANTHROPIC_API_KEY", ""):
-            with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        with patch("app.ANTHROPIC_API_KEY", ""), patch("app.OPENAI_API_KEY", ""), patch("app.GEMINI_API_KEY", ""):
+            with pytest.raises(RuntimeError, match="APIキー"):
                 _app.generate_speaker_summaries("transcript")
 
     def test_returns_summary_text(self):
