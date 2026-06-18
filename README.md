@@ -169,12 +169,32 @@ Claude API（claude-opus-4-8）の従量課金：
 
 ---
 
+## テスト
+
+127件のテストが用意されています。
+
+```powershell
+# 全テストを実行
+pytest test_app.py test_frontend.py -v
+```
+
+| テストファイル | 件数 | 内容 |
+|--------------|------|------|
+| `test_app.py` | 89件 | Python バックエンド（全エンドポイント・ユーティリティ関数） |
+| `test_frontend.py` | 38件 | HTML 内 JavaScript 関数（Node.js 実行） |
+
+> `test_frontend.py` の実行には Node.js が必要です。
+
+---
+
 ## ファイル構成
 
 ```
 meeting_transcriber/
 ├── app.py               # メインアプリケーション
 ├── requirements.txt     # Python 依存パッケージ
+├── test_app.py          # バックエンドテスト（89件）
+├── test_frontend.py     # フロントエンド JS テスト（38件）
 ├── .env                 # APIキー設定（Git管理外）
 ├── .env.example         # 環境変数テンプレート
 ├── .gitignore
