@@ -9,7 +9,9 @@ app.py のユニットテスト・インテグレーションテスト
 from __future__ import annotations
 
 import json
+import shutil
 import sys
+import tempfile
 import types
 import unittest.mock as mock
 from pathlib import Path
@@ -602,3 +604,443 @@ class TestGenerateMinutes:
             _app.generate_minutes(long_transcript, progress_cb=lambda p, l: calls.append((p, l)))
         assert any("要約" in label for _, label in calls)
         assert any("最終" in label for _, label in calls)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 12. transcribe_with_segments
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class TestTranscribeWithSegments:
+    def _seg(self, start, end, text):
+        s = MagicMock()
+        s.start, s.end, s.text = start, end, f"  {text}  "
+        return s
+
+    def _info(self, duration, language):
+        i = MagicMock()
+        i.duration, i.language = duration, language
+        return i
+
+    def test_returns_segments_and_language(self):
+        _app.whisper_model.transcribe.return_value = (
+            [self._seg(0.0, 2.0, "hello")], self._info(10.0, "ja")
+        )
+        result, lang = _app.transcribe_with_segments(Path("dummy.wav"))
+        assert lang == "ja"
+        assert result == [{"start": 0.0, "end": 2.0, "text": "hello"}]
+
+    def test_whitespace_stripped_from_text(self):
+        _app.whisper_model.transcribe.return_value = (
+            [self._seg(0.0, 1.0, "  trimmed  ")], self._info(10.0, "ja")
+        )
+        result, _ = _app.transcribe_with_segments(Path("dummy.wav"))
+        assert result[0]["text"] == "trimmed"
+
+    def test_progress_pct_calculation(self):
+        # end=100, total=200 → pct = 10 + int(100/200 * 50) = 35
+        _app.whisper_model.transcribe.return_value = (
+            [self._seg(0.0, 100.0, "x")], self._info(200.0, "ja")
+        )
+        calls = []
+        _app.transcribe_with_segments(Path("dummy.wav"), progress_cb=lambda p, l: calls.append(p))
+        assert calls[0] == min(58, 10 + int(100.0 / 200.0 * 50))
+
+    def test_pct_capped_at_58(self):
+        # end >> total → without cap would exceed 58
+        _app.whisper_model.transcribe.return_value = (
+            [self._seg(0.0, 999.0, "x")], self._info(1.0, "ja")
+        )
+        calls = []
+        _app.transcribe_with_segments(Path("dummy.wav"), progress_cb=lambda p, l: calls.append(p))
+        assert calls[0] == 58
+
+    def test_progress_label_contains_timestamps(self):
+        _app.whisper_model.transcribe.return_value = (
+            [self._seg(0.0, 65.0, "x")], self._info(180.0, "ja")
+        )
+        labels = []
+        _app.transcribe_with_segments(Path("dummy.wav"), progress_cb=lambda p, l: labels.append(l))
+        assert "01:05" in labels[0]
+        assert "03:00" in labels[0]
+
+    def test_zero_duration_does_not_raise(self):
+        # duration=0 → max(0 or 1, 1) = 1, no ZeroDivisionError
+        _app.whisper_model.transcribe.return_value = (
+            [self._seg(0.0, 0.0, "x")], self._info(0, "ja")
+        )
+        result, _ = _app.transcribe_with_segments(Path("dummy.wav"))
+        assert len(result) == 1
+
+    def test_no_progress_cb_works(self):
+        _app.whisper_model.transcribe.return_value = (
+            [self._seg(0.0, 1.0, "hi")], self._info(5.0, "en")
+        )
+        result, lang = _app.transcribe_with_segments(Path("dummy.wav"))
+        assert lang == "en"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 13. generate_speaker_summaries
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class TestGenerateSpeakerSummaries:
+    def _mock_response(self, text):
+        block = MagicMock()
+        block.type, block.text = "text", text
+        resp = MagicMock()
+        resp.content = [block]
+        return resp
+
+    def test_raises_without_api_key(self):
+        with patch("app.ANTHROPIC_API_KEY", ""):
+            with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+                _app.generate_speaker_summaries("transcript")
+
+    def test_returns_summary_text(self):
+        with patch("app.ANTHROPIC_API_KEY", "dummy"), \
+             patch("app.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.return_value = self._mock_response("## 話者別サマリー\n内容")
+            result = _app.generate_speaker_summaries("話者1: こんにちは")
+        assert "話者別サマリー" in result
+
+    def test_uses_speaker_summary_system_prompt(self):
+        with patch("app.ANTHROPIC_API_KEY", "dummy"), \
+             patch("app.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.return_value = self._mock_response("result")
+            _app.generate_speaker_summaries("transcript")
+        call_kwargs = mock_cls.return_value.messages.create.call_args[1]
+        assert call_kwargs["system"] == _app.SPEAKER_SUMMARY_SYSTEM
+
+    def test_passes_transcript_in_user_message(self):
+        with patch("app.ANTHROPIC_API_KEY", "dummy"), \
+             patch("app.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.return_value = self._mock_response("ok")
+            _app.generate_speaker_summaries("話者1: テスト発言")
+        messages = mock_cls.return_value.messages.create.call_args[1]["messages"]
+        assert "話者1: テスト発言" in messages[0]["content"]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 14. diarize
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class TestDiarize:
+    def _make_pipeline(self, segments):
+        mock_diarization = MagicMock()
+        mock_diarization.itertracks.return_value = segments
+        return MagicMock(return_value=mock_diarization)
+
+    def _turn(self, start, end):
+        t = MagicMock()
+        t.start, t.end = start, end
+        return t
+
+    def test_wav_skips_ffmpeg_conversion(self):
+        pipeline = self._make_pipeline([(self._turn(0.0, 5.0), None, "SPEAKER_00")])
+        with patch("app.get_diarization_pipeline", return_value=pipeline), \
+             patch("app.subprocess.run") as mock_run:
+            result = _app.diarize(Path("audio.wav"))
+        mock_run.assert_not_called()
+        assert result == [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}]
+
+    def test_non_wav_calls_ffmpeg(self):
+        pipeline = self._make_pipeline([(self._turn(0.0, 3.0), None, "SPEAKER_00")])
+        with patch("app.get_diarization_pipeline", return_value=pipeline), \
+             patch("app.subprocess.run") as mock_run:
+            _app.diarize(Path("audio.mp3"))
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        assert any("audio.mp3" in str(a) for a in cmd)
+
+    def test_returns_multiple_segments(self):
+        turns = [
+            (self._turn(0.0, 2.0), None, "SPEAKER_00"),
+            (self._turn(2.5, 5.0), None, "SPEAKER_01"),
+        ]
+        pipeline = self._make_pipeline(turns)
+        with patch("app.get_diarization_pipeline", return_value=pipeline), \
+             patch("app.subprocess.run"):
+            result = _app.diarize(Path("audio.wav"))
+        assert len(result) == 2
+        assert result[0] == {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}
+        assert result[1] == {"start": 2.5, "end": 5.0, "speaker": "SPEAKER_01"}
+
+    def test_empty_pipeline_result_returns_empty_list(self):
+        pipeline = self._make_pipeline([])
+        with patch("app.get_diarization_pipeline", return_value=pipeline), \
+             patch("app.subprocess.run"):
+            result = _app.diarize(Path("audio.wav"))
+        assert result == []
+
+    def test_wav_path_derived_from_input(self):
+        """非WAVのとき、変換先パスは入力ファイルの.wav版になる"""
+        pipeline = self._make_pipeline([])
+        with patch("app.get_diarization_pipeline", return_value=pipeline), \
+             patch("app.subprocess.run") as mock_run:
+            _app.diarize(Path("audio.m4a"))
+        cmd = mock_run.call_args[0][0]
+        assert any("audio.wav" in str(a) for a in cmd)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 15. POST /transcribe  16. POST /process-speakers (TestClient)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+try:
+    from fastapi.testclient import TestClient as _TC2
+
+    _client2 = _TC2(_app.app, raise_server_exceptions=False)
+
+    class TestTranscribeEndpoint:
+        def setup_method(self):
+            self.tmp_dir = Path(tempfile.mkdtemp())
+            self._orig_dir = _app.OUTPUT_DIR
+            _app.OUTPUT_DIR = self.tmp_dir
+
+        def teardown_method(self):
+            _app.OUTPUT_DIR = self._orig_dir
+            shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+        def test_rejects_unsupported_extension(self):
+            resp = _client2.post(
+                "/transcribe",
+                files={"file": ("test.txt", b"content", "text/plain")},
+                data={"use_diarization": "false"},
+            )
+            assert resp.status_code == 400
+
+        def test_no_diarization_returns_success(self):
+            with patch("app.transcribe_only", return_value=("文字起こし内容", "ja")), \
+                 patch("app.generate_minutes", return_value="# 議事録"), \
+                 patch("app.create_docx"):
+                resp = _client2.post(
+                    "/transcribe",
+                    files={"file": ("audio.mp3", b"fake", "audio/mpeg")},
+                    data={"use_diarization": "false"},
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["success"] is True
+            assert data["diarization_used"] is False
+            assert data["transcript"] == "文字起こし内容"
+            assert data["language"] == "ja"
+
+        def test_diarization_returns_success(self):
+            whisper_segs = [{"start": 0.0, "end": 2.0, "text": "hello"}]
+            diarize_segs = [{"start": 0.0, "end": 3.0, "speaker": "SPEAKER_00"}]
+            with patch("app.transcribe_with_segments", return_value=(whisper_segs, "ja")), \
+                 patch("app.diarize", return_value=diarize_segs), \
+                 patch("app.generate_minutes", return_value="# 議事録"), \
+                 patch("app.create_docx"):
+                resp = _client2.post(
+                    "/transcribe",
+                    files={"file": ("audio.wav", b"fake", "audio/wav")},
+                    data={"use_diarization": "true"},
+                )
+            assert resp.status_code == 200
+            assert resp.json()["diarization_used"] is True
+
+        def test_template_file_passed_to_generate_minutes(self):
+            with patch("app.transcribe_only", return_value=("transcript", "ja")), \
+                 patch("app.generate_minutes", return_value="# 議事録") as mock_gen, \
+                 patch("app.create_docx"):
+                resp = _client2.post(
+                    "/transcribe",
+                    files={
+                        "file": ("audio.mp3", b"fake", "audio/mpeg"),
+                        "template_file": ("tmpl.md", "## テンプレート".encode(), "text/markdown"),
+                    },
+                    data={"use_diarization": "false"},
+                )
+            assert resp.status_code == 200
+            template_arg = mock_gen.call_args[0][1]
+            assert template_arg != ""
+
+        def test_response_includes_download_links(self):
+            with patch("app.transcribe_only", return_value=("text", "ja")), \
+                 patch("app.generate_minutes", return_value="# 議事録"), \
+                 patch("app.create_docx"):
+                resp = _client2.post(
+                    "/transcribe",
+                    files={"file": ("audio.mp3", b"fake", "audio/mpeg")},
+                    data={"use_diarization": "false"},
+                )
+            data = resp.json()
+            assert data["files"]["markdown"].startswith("/download/md/")
+            assert data["files"]["word"].startswith("/download/docx/")
+
+    class TestProcessSpeakersEndpoint:
+        def setup_method(self):
+            self.tmp_dir = Path(tempfile.mkdtemp())
+            self._orig_dir = _app.OUTPUT_DIR
+            _app.OUTPUT_DIR = self.tmp_dir
+
+        def teardown_method(self):
+            _app.OUTPUT_DIR = self._orig_dir
+            shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+        def test_replaces_speaker_names_in_transcript_and_minutes(self):
+            with patch("app.generate_speaker_summaries", return_value="## サマリー"), \
+                 patch("app.create_docx"):
+                resp = _client2.post(
+                    "/process-speakers",
+                    json={
+                        "transcript": "話者1: おはよう\n話者2: こんにちは",
+                        "minutes": "# 議事録\n話者1が発言した",
+                        "speaker_map": {"話者1": "田中", "話者2": "佐藤"},
+                        "title": "test_speakers",
+                    },
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["success"] is True
+            assert "田中" in data["transcript"]
+            assert "佐藤" in data["transcript"]
+            assert "田中" in data["minutes"]
+
+        def test_empty_speaker_map_leaves_labels_unchanged(self):
+            with patch("app.generate_speaker_summaries", return_value="summary"), \
+                 patch("app.create_docx"):
+                resp = _client2.post(
+                    "/process-speakers",
+                    json={
+                        "transcript": "話者1: hello",
+                        "minutes": "# 議事録",
+                        "speaker_map": {},
+                        "title": "test_no_map",
+                    },
+                )
+            assert resp.status_code == 200
+            assert resp.json()["transcript"] == "話者1: hello"
+
+        def test_empty_title_generates_default_prefix(self):
+            with patch("app.generate_speaker_summaries", return_value="summary"), \
+                 patch("app.create_docx"):
+                resp = _client2.post(
+                    "/process-speakers",
+                    json={
+                        "transcript": "話者1: hi",
+                        "minutes": "# 議事録",
+                        "speaker_map": {},
+                    },
+                )
+            assert resp.status_code == 200
+            assert "speakers_" in resp.json()["files"]["markdown"]
+
+        def test_speaker_summary_included_in_response(self):
+            with patch("app.generate_speaker_summaries", return_value="## 話者別サマリー\n内容"), \
+                 patch("app.create_docx"):
+                resp = _client2.post(
+                    "/process-speakers",
+                    json={
+                        "transcript": "話者1: hi",
+                        "minutes": "# 議事録",
+                        "speaker_map": {},
+                        "title": "test_summary",
+                    },
+                )
+            assert "話者別サマリー" in resp.json()["speaker_summary"]
+
+except ImportError:
+    pass
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 17. _run_job (async background job)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class TestRunJob:
+    pytestmark = pytest.mark.asyncio
+
+    def setup_method(self):
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        self._orig_dir = _app.OUTPUT_DIR
+        _app.OUTPUT_DIR = self.tmp_dir
+
+    def teardown_method(self):
+        _app.OUTPUT_DIR = self._orig_dir
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_no_diarize_job_completes_successfully(self):
+        job_id = "run-job-1"
+        tmp = Path(tempfile.mktemp(suffix=".mp3"))
+        tmp.write_bytes(b"fake")
+        _app._jobs[job_id] = {"pct": 0, "label": "", "done": False}
+
+        with patch("app.transcribe_with_segments",
+                   return_value=([{"start": 0.0, "end": 1.0, "text": "hello"}], "ja")), \
+             patch("app.generate_minutes", return_value="# 議事録"), \
+             patch("app.create_docx"):
+            await _app._run_job(job_id, tmp, False, "", "test.mp3")
+
+        job = _app._jobs[job_id]
+        assert job["done"] is True
+        assert job["result"]["success"] is True
+        assert job["result"]["language"] == "ja"
+        assert job["result"]["diarization_used"] is False
+        assert not tmp.exists()
+        _app._jobs.pop(job_id, None)
+
+    @pytest.mark.asyncio
+    async def test_diarize_mode_calls_diarize_function(self):
+        job_id = "run-job-2"
+        tmp = Path(tempfile.mktemp(suffix=".wav"))
+        tmp.write_bytes(b"fake")
+        _app._jobs[job_id] = {"pct": 0, "label": "", "done": False}
+
+        with patch("app.transcribe_with_segments",
+                   return_value=([{"start": 0.0, "end": 1.0, "text": "hi"}], "ja")), \
+             patch("app.diarize",
+                   return_value=[{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]) as mock_diarize, \
+             patch("app.generate_minutes", return_value="# 議事録"), \
+             patch("app.create_docx"):
+            await _app._run_job(job_id, tmp, True, "", "test.wav")
+
+        mock_diarize.assert_called_once_with(tmp)
+        assert _app._jobs[job_id]["result"]["diarization_used"] is True
+        _app._jobs.pop(job_id, None)
+
+    @pytest.mark.asyncio
+    async def test_error_sets_job_error_state(self):
+        job_id = "run-job-3"
+        tmp = Path(tempfile.mktemp(suffix=".mp3"))
+        _app._jobs[job_id] = {"pct": 0, "label": "", "done": False}
+
+        with patch("app.transcribe_with_segments", side_effect=RuntimeError("transcribe failed")):
+            await _app._run_job(job_id, tmp, False, "", "test.mp3")
+
+        assert _app._jobs[job_id]["done"] is True
+        assert "transcribe failed" in _app._jobs[job_id]["error"]
+        _app._jobs.pop(job_id, None)
+
+    @pytest.mark.asyncio
+    async def test_tmp_file_cleaned_up_on_error(self):
+        job_id = "run-job-4"
+        tmp = Path(tempfile.mktemp(suffix=".mp3"))
+        tmp.write_bytes(b"fake")
+        _app._jobs[job_id] = {"pct": 0, "label": "", "done": False}
+
+        with patch("app.transcribe_with_segments", side_effect=RuntimeError("fail")):
+            await _app._run_job(job_id, tmp, False, "", "test.mp3")
+
+        assert not tmp.exists()
+        _app._jobs.pop(job_id, None)
+
+    @pytest.mark.asyncio
+    async def test_with_template_text(self):
+        job_id = "run-job-5"
+        tmp = Path(tempfile.mktemp(suffix=".mp3"))
+        tmp.write_bytes(b"fake")
+        _app._jobs[job_id] = {"pct": 0, "label": "", "done": False}
+
+        with patch("app.transcribe_with_segments",
+                   return_value=([{"start": 0.0, "end": 1.0, "text": "hello"}], "ja")), \
+             patch("app.generate_minutes", return_value="# 議事録") as mock_gen, \
+             patch("app.create_docx"):
+            await _app._run_job(job_id, tmp, False, "## テンプレート", "test.mp3")
+
+        template_arg = mock_gen.call_args[0][1]
+        assert template_arg == "## テンプレート"
+        assert _app._jobs[job_id]["result"]["template_used"] is True
+        _app._jobs.pop(job_id, None)
