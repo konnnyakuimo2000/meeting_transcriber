@@ -140,26 +140,25 @@ class TestFormatSpeakerTranscript:
 
 class TestExtractSpeakers:
     def test_basic_extraction(self):
-        # NOTE: regex `話者\S+` includes trailing `:` — returns "話者1:" not "話者1"
-        # This is a known bug; tests document current behavior.
         transcript = "[00:00] 話者1: こんにちは\n[00:05] 話者2: よろしく"
         result = _app.extract_speakers(transcript)
-        assert "話者1:" in result
-        assert "話者2:" in result
+        assert "話者1" in result
+        assert "話者2" in result
+
+    def test_colon_not_included_in_label(self):
+        """コロンが話者ラベルに含まれないことを確認"""
+        transcript = "[00:00] 話者1: hello"
+        result = _app.extract_speakers(transcript)
+        assert "話者1:" not in result
+        assert "話者1" in result
 
     def test_deduplication(self):
         transcript = "[00:00] 話者1: a\n[00:05] 話者1: b"
         result = _app.extract_speakers(transcript)
-        assert result.count("話者1:") == 1
+        assert result.count("話者1") == 1
 
     def test_preserves_insertion_order(self):
         transcript = "[00:00] 話者1: a\n[00:05] 話者2: b\n[00:10] 話者1: c"
-        result = _app.extract_speakers(transcript)
-        assert result == ["話者1:", "話者2:"]
-
-    def test_no_colon_in_label_extracts_cleanly(self):
-        """コロンなしのフォーマットでは末尾コロンなしで取得できる"""
-        transcript = "話者1 spoke first, 話者2 responded"
         result = _app.extract_speakers(transcript)
         assert result == ["話者1", "話者2"]
 
@@ -220,11 +219,8 @@ class TestSplitTranscript:
         for chunk in result:
             assert len(chunk) <= 300  # 多少超えてもよいがチャンクが分割されている
 
-    def test_empty_text_returns_list_with_empty_string(self):
-        # NOTE: "".split("\n") returns [""], so the function returns [""] not []
-        # This is a known bug — empty input ideally should return [].
-        result = _app._split_transcript("", 100)
-        assert result == [""]
+    def test_empty_text_returns_empty_list(self):
+        assert _app._split_transcript("", 100) == []
 
     def test_single_long_line_still_added(self):
         """1行がmax_charsを超えていてもcurrentが空なら追加される"""
