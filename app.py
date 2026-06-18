@@ -1257,7 +1257,7 @@ function getSpeakerColor(label) {
 
 function extractSpeakers(transcript) {
   const seen = new Map();
-  for (const m of transcript.matchAll(/話者\S+/g)) {
+  for (const m of transcript.matchAll(/話者[^\s:：]+/g)) {
     if (!seen.has(m[0])) seen.set(m[0], null);
   }
   return [...seen.keys()];
