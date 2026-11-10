@@ -2,6 +2,10 @@
 
 音声ファイルをアップロードするだけで、AI が自動で文字起こし・話者識別・議事録生成を行うWebアプリです。
 
+[![最新リリース](https://img.shields.io/github/v/release/konnnyakuimo2000/meeting_transcriber)](https://github.com/konnnyakuimo2000/meeting_transcriber/releases/latest)
+
+**➡ [最新版をダウンロード（Releases）](https://github.com/konnnyakuimo2000/meeting_transcriber/releases/latest)**
+
 ---
 
 ## 機能
@@ -44,7 +48,7 @@
 
 ## かんたんインストール（Windows）
 
-1. このリポジトリをダウンロード（緑の「Code」→「Download ZIP」→ 展開）
+1. [Releases](https://github.com/konnnyakuimo2000/meeting_transcriber/releases/latest) の **Assets** から `meeting_transcriber-vX.Y.Z.zip` をダウンロードして展開
 2. **`install.bat` をダブルクリック**
    - Python・FFmpeg が無ければ winget で自動インストール
    - 仮想環境 `.venv` を作成し、GPU の有無に合わせて PyTorch（CUDA版／CPU版）を導入
@@ -169,8 +173,18 @@ $condaPython = "$env:USERPROFILE\anaconda3\envs\meeting_transcriber\python.exe"
 ### 議事録テンプレートを使う
 
 1. 「📋 議事録テンプレート（任意）」の「ファイルを選択」をクリック
-2. Markdown または テキストファイルを選択（`sample_template.md` を参考に作成）
+2. Markdown または テキストファイルを選択（同梱テンプレートを使うか、参考にして作成）
 3. テンプレートに除外ルール・フォーマット指示を記述することで細かい制御が可能
+
+**同梱テンプレート：**
+
+| ファイル | 用途 |
+|---------|------|
+| `sample_template.md` | 汎用の会議議事録 |
+| `template_rinko.md` | 輪講（論文紹介・ゼミ発表）の議事録 |
+| `template_class_presentation.md` | 授業内発表（質疑応答・フィードバック・先生論評のみ記録） |
+| `template_lecture.md` | 講義内容の要約のみ（概要・トピック・重要ポイント・用語） |
+| `template_lecture_summary.md` | 講義の文字起こし・要約（講師の発言のみ、次回・課題つき） |
 
 **テンプレートにルールを書く例：**
 
@@ -234,6 +248,9 @@ meeting_transcriber/
 ├── .env.example         # 環境変数テンプレート
 ├── .gitignore
 ├── sample_template.md              # 汎用議事録テンプレート
+├── template_rinko.md               # 輪講用テンプレート
 ├── template_class_presentation.md  # 授業内発表用テンプレート
+├── template_lecture.md             # 講義要約用テンプレート
+├── template_lecture_summary.md     # 講義文字起こし・要約用テンプレート
 └── outputs/                        # 生成ファイルの保存先（Git管理外）
 ```
