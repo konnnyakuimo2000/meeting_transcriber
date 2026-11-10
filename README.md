@@ -42,7 +42,22 @@
 
 ---
 
-## セットアップ
+## かんたんインストール（Windows）
+
+1. このリポジトリをダウンロード（緑の「Code」→「Download ZIP」→ 展開）
+2. **`install.bat` をダブルクリック**
+   - Python・FFmpeg が無ければ winget で自動インストール
+   - 仮想環境 `.venv` を作成し、GPU の有無に合わせて PyTorch（CUDA版／CPU版）を導入
+   - `.env` を作成してメモ帳で開くので、APIキーを1つ記入して保存
+3. **`start.bat` をダブルクリック**で起動 → ブラウザで `http://localhost:8510` が開きます
+
+> 初回の起動時は Whisper モデルのダウンロードに数分かかります。GPU が無い PC では自動で CPU 実行になります。
+
+手動でセットアップしたい場合は、以下の手順に従ってください。
+
+---
+
+## セットアップ（手動）
 
 ### 1. AIプロバイダーのAPIキーを取得
 
@@ -212,6 +227,9 @@ meeting_transcriber/
 ├── requirements.txt     # Python 依存パッケージ
 ├── test_app.py          # バックエンドテスト（89件）
 ├── test_frontend.py     # フロントエンド JS テスト（38件）
+├── install.bat          # インストーラー（ダブルクリック）
+├── install.ps1          # インストーラー本体
+├── start.bat            # 起動スクリプト（ダブルクリック）
 ├── .env                 # APIキー設定（Git管理外）
 ├── .env.example         # 環境変数テンプレート
 ├── .gitignore

@@ -163,15 +163,34 @@ _AI_PROVIDER_ENV = os.getenv("AI_PROVIDER", "").lower()
 OUTPUT_DIR = Path("outputs")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# ffmpegパス
-FFMPEG_EXE = Path(r"C:\Users\toshi\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.1-full_build\bin\ffmpeg.exe")
+# ffmpegパス（環境変数 FFMPEG_PATH → PATH → winget のインストール先 の順に探す）
+def _find_ffmpeg() -> str:
+    import shutil
+    env_path = os.getenv("FFMPEG_PATH", "")
+    if env_path and Path(env_path).exists():
+        return env_path
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    winget_dir = Path(os.getenv("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages"
+    if winget_dir.exists():
+        for exe in winget_dir.glob("Gyan.FFmpeg*/**/bin/ffmpeg.exe"):
+            return str(exe)
+    return "ffmpeg"
+
+
+FFMPEG_EXE = _find_ffmpeg()
 
 # ── FastAPI ───────────────────────────────────────────────────────────
 app = FastAPI(title="議事録自動生成")
 
 # ── Whisperモデル（起動時に一度だけロード）────────────────────────────
 print(f"Whisperモデル ({WHISPER_MODEL_SIZE}) をロード中...")
-whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cuda", compute_type="float16")
+try:
+    whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cuda", compute_type="float16")
+except Exception as _e:
+    print(f"GPU(CUDA)が使えないためCPUで実行します: {_e}")
+    whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
 print("Whisperモデル ロード完了")
 
 # ── ジョブ進捗管理 ────────────────────────────────────────────────────
